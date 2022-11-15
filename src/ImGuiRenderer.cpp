@@ -233,7 +233,6 @@ void ImGuiRenderer::setupRenderState(ImDrawData* data, vfx::CommandBuffer* cmd, 
     };
 
     cmd->pushConstants(
-        pipelineState,
         vk::ShaderStageFlagBits::eVertex,
         0,
         std::span(transform).size_bytes(),

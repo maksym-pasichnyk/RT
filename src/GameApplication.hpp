@@ -47,14 +47,12 @@ private:
     Arc<PlayerInput> playerInput = {};
     Arc<ImGuiRenderer> imguiRenderer = {};
 
-    Arc<vfx::Sampler> defaultTextureSampler = {};
-    Arc<vfx::Texture> colorAttachmentTexture = {};
+    Arc<vfx::Sampler> textureSampler = {};
     Arc<vfx::Texture> depthAttachmentTexture = {};
+    Arc<vfx::Texture> colorAttachmentTexture = {};
+    Arc<vfx::Texture> accumulateAttachmentTexture = {};
 
-    u64 traceIndex = 0;
-    std::vector<glm::vec3> rayDirections{};
-    std::vector<glm::vec4> traceAttachmentPixels{};
-    std::vector<glm::vec4> colorAttachmentPixels{};
+    Arc<vfx::Buffer> rayDirections{};
 
     Arc<vfx::RenderPipelineState> presentPipelineState = {};
     Arc<vfx::ResourceGroup> presentResourceGroup = {};
@@ -70,7 +68,7 @@ private:
     glm::vec3 cameraPosition = {};
     glm::vec3 cameraRotation = {};
 
-    std::default_random_engine random{};
+    int accumulateFrame = 0;
 
     volatile bool running = false;
 };

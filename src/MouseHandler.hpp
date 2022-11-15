@@ -15,9 +15,11 @@ public:
     void onMove(f64 x, f64 y);
     void onPress(i32 button, i32 action, i32 mods);
 
+    [[nodiscard]]
     auto getMouseDelta() -> const glm::dvec2&;
     void resetMouseDelta();
 
+    [[nodiscard]]
     auto isMouseGrabbed() const -> bool;
 
 private:

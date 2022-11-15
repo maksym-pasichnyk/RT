@@ -14,110 +14,6 @@
 
 #include <random>
 
-struct Sphere {
-    float3 Position = {};
-    float Radius = 0.5f;
-
-    float3 Albedo = float3(1, 1, 1);
-    float Roughness = 1.0f;
-    float Metallic = 0.0f;
-};
-
-struct HitResult {
-    float  Distance;
-    float3 Normal;
-    float3 Position;
-    u32    ObjectIndex;
-};
-
-auto trace(
-    const glm::vec3& rayOrigin,
-    const glm::vec3& rayDirection,
-    std::span<const Sphere> spheres
-) -> HitResult {
-    using namespace glm;
-
-    i32 objectIndex = -1;
-    float distance = std::numeric_limits<f32>::max();
-    float a = dot(rayDirection, rayDirection);
-    for (size_t i = 0; i < spheres.size(); ++i) {
-        vec3 origin = rayOrigin - spheres[i].Position;
-
-        float b = 2.f * dot(origin, rayDirection);
-        float c = dot(origin, origin) - spheres[i].Radius * spheres[i].Radius;
-        float determinant = b * b - 4.f * a * c;
-
-        if (determinant < 0.f) {
-            continue;
-        }
-
-        float t0 = (-b + glm::sqrt(determinant)) / (2.0f * a);
-        float t1 = (-b - glm::sqrt(determinant)) / (2.0f * a);
-        float d = min(t0, t1);
-
-        if (d < 0.0f) {
-            continue;
-        }
-
-        if (distance > d) {
-            objectIndex = i32(i);
-            distance = d;
-        }
-    }
-
-    if (objectIndex == -1) {
-        return HitResult{.Distance = -1.f};
-    }
-
-    vec3 position = rayOrigin + rayDirection * distance;
-    vec3 normal = normalize(position - spheres[objectIndex].Position);
-
-    return HitResult{
-        .Distance = distance,
-        .Normal = normal,
-        .Position = position,
-        .ObjectIndex = u32(objectIndex)
-    };
-}
-
-auto mainImage(
-    std::default_random_engine& random,
-    const glm::vec3& rayOrigin,
-    const glm::vec3& rayDirection,
-    std::span<const Sphere> spheres
-) -> glm::vec4 {
-    using namespace glm;
-
-    vec3 lightDirection = normalize(vec3(-1, -1, 1));
-
-    vec3 ro = rayOrigin;
-    vec3 rd = rayDirection;
-
-    vec3 color = vec3(0, 0, 0);
-    vec3 skyColor = vec3(.6f, .7f, .9f);
-
-    f32 multiplier = 1.0f;
-
-    for (i32 i = 0; i < 2; ++i) {
-        HitResult hit = trace(ro, rd, spheres);
-        if (hit.Distance < 0) {
-            color += skyColor * multiplier;
-            break;
-        }
-
-        float lightIntensity = max(dot(hit.Normal, -lightDirection), 0.f);
-        color += spheres[hit.ObjectIndex].Albedo * lightIntensity * multiplier;
-
-        vec3 normal = hit.Normal + spheres[hit.ObjectIndex].Roughness * std::uniform_real_distribution{-0.5f, +0.5f}(random);
-
-        rd = reflect(rd, normal);
-        ro = hit.Position + normal * 1e-3f;
-
-        multiplier *= 0.5f;
-    }
-    return vec4(color, 1.0f);
-}
-
 GameApplication::GameApplication() {
     window = Arc<Window>::alloc(800, 600);
     window->setTitle("Game");
@@ -139,7 +35,7 @@ GameApplication::GameApplication() {
     mouseHandler = Arc<MouseHandler>::alloc(window);
     imguiRenderer = Arc<ImGuiRenderer>::alloc(device, window);
 
-    defaultTextureSampler = device->makeSampler(vk::SamplerCreateInfo{
+    textureSampler = device->makeSampler(vk::SamplerCreateInfo{
         .magFilter = vk::Filter::eNearest,
         .minFilter = vk::Filter::eNearest,
         .mipmapMode = vk::SamplerMipmapMode::eNearest,
@@ -199,7 +95,7 @@ void GameApplication::update(f32 dt) {
             auto velocity = glm::normalize(orientation * glm::vec3(direction)) * 10.0f;
 
             cameraPosition += velocity * dt;
-            traceIndex = 0;
+            accumulateFrame = 0;
         }
 
         f64 d4 = 2.0 * 0.5 * 0.6 + 0.2;
@@ -212,8 +108,7 @@ void GameApplication::update(f32 dt) {
             cameraRotation.x += f32(delta.y * d5) * dt;
             cameraRotation.y += f32(delta.x * d5) * dt;
             cameraRotation.x = glm::clamp(cameraRotation.x, -90.0f, 90.0f);
-
-            traceIndex = 0;
+            accumulateFrame = 0;
         }
 
     }
@@ -276,12 +171,6 @@ void GameApplication::render() {
     auto viewProjectionMatrix = projectionMatrix * worldToCameraMatrix;
     auto inverseViewProjectionMatrix = glm::inverse(viewProjectionMatrix);
 
-    if (traceIndex == 0) {
-        std::fill(traceAttachmentPixels.begin(), traceAttachmentPixels.end(), glm::vec4());
-    }
-
-    traceIndex += 1;
-
     auto scene = SceneConstants{
         .ProjectionMatrix = projectionMatrix,
         .WorldToCameraMatrix = worldToCameraMatrix,
@@ -291,31 +180,150 @@ void GameApplication::render() {
     };
     auto resolution = glm::vec2(f32(imageWidth), f32(imageHeight));
 
-//    cmd->setComputePipelineState(raytracePipelineState);
-//    cmd->dispatch(1, 1, 1);
+    // todo: move to a better place
+    cmd->imageMemoryBarrier(vk::ImageMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
+        .srcAccessMask = vk::AccessFlagBits2{},
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = colorAttachmentTexture->image,
+        .subresourceRange = {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .levelCount = 1,
+            .layerCount = 1
+        }
+    });
+    // todo: move to a better place
+    cmd->imageMemoryBarrier(vk::ImageMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
+        .srcAccessMask = vk::AccessFlagBits2{},
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = accumulateAttachmentTexture->image,
+        .subresourceRange = {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .levelCount = 1,
+            .layerCount = 1
+        }
+    });
+    cmd->flushBarriers();
+    accumulateFrame += 1;
 
+    struct ComputeData {
+        glm::vec3 cameraPosition;
+        float time;
+        int accumulateFrame;
+    };
+    auto computeData = ComputeData{
+        .cameraPosition = cameraPosition,
+        .time = float(glfwGetTime()),
+        .accumulateFrame = accumulateFrame
+    };
+
+    cmd->setComputePipelineState(raytracePipelineState);
+    cmd->bindResourceGroup(raytraceResourceGroup, 0);
+    cmd->pushConstants(vk::ShaderStageFlagBits::eCompute, 0, sizeof(ComputeData), &computeData);
+
+    cmd->dispatch(
+        (colorAttachmentTexture->size.width / 10) + 1,
+        (colorAttachmentTexture->size.height / 10) + 1,
+        1
+    );
+
+    // todo: move to a better place
+    cmd->imageMemoryBarrier(vk::ImageMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eReadOnlyOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = colorAttachmentTexture->image,
+        .subresourceRange = {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .levelCount = 1,
+            .layerCount = 1
+        }
+    });
+    cmd->flushBarriers();
+
+    auto rd_ptr = static_cast<glm::vec4*>(rayDirections->map());
     for (i32 y = 0; y < imageHeight; ++y) {
         for (i32 x = 0; x < imageWidth; ++x) {
             auto uv = 2.f * glm::vec2(x, y) / resolution - 1.f;
-            rayDirections[y * imageWidth + x] = glm::vec3(inverseViewProjectionMatrix * glm::vec4(uv, 0.f, 1.f));
+            auto rd = glm::vec3(inverseViewProjectionMatrix * glm::vec4(uv, 0.f, 1.f));
+            rd_ptr[y * imageWidth + x] = glm::vec4(rd, 1.0f);
         }
     }
+    rayDirections->unmap();
 
-    auto spheres = {
-        Sphere{.Position = glm::vec3(0, 0, 0), .Radius = 1, .Albedo = glm::vec3(1, 0, 1), .Roughness = 1.0f},
-        Sphere{.Position = glm::vec3(0, -1001, 0), .Radius = 1000, .Albedo = glm::vec3(0, 0, 1), .Roughness = 0.1f}
-    };
-
-    for (i32 y = 0; y < imageHeight; ++y) {
-        for (i32 x = 0; x < imageWidth; ++x) {
-            auto color = mainImage(random, cameraPosition, rayDirections[y * imageWidth + x], spheres);
-
-            traceAttachmentPixels[y * imageWidth + x] += color;
-            colorAttachmentPixels[y * imageWidth + x] = traceAttachmentPixels[y * imageWidth + x] / f32(traceIndex);
-        }
-    }
-
-    colorAttachmentTexture->update(colorAttachmentPixels.data(), colorAttachmentPixels.size() * sizeof(glm::vec4));
+//    // todo: move to a better place
+//    cmd->imageMemoryBarrier(vk::ImageMemoryBarrier2{
+//        .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
+//        .srcAccessMask = vk::AccessFlagBits2{},
+//        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+//        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+//        .oldLayout = vk::ImageLayout::eUndefined,
+//        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+//        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+//        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+//        .image = colorAttachmentTexture->image,
+//        .subresourceRange = {
+//            .aspectMask = vk::ImageAspectFlagBits::eColor,
+//            .levelCount = 1,
+//            .layerCount = 1
+//        }
+//    });
+//    cmd->flushBarriers();
+//
+//    auto region = vk::BufferImageCopy{
+//        .imageSubresource = {
+//            .aspectMask = vk::ImageAspectFlagBits::eColor,
+//            .layerCount = 1
+//        },
+//        .imageExtent = {
+//            .width = colorAttachmentTexture->size.width,
+//            .height = colorAttachmentTexture->size.height,
+//            .depth = 1
+//        }
+//    };
+//    cmd->handle->copyBufferToImage(
+//        colorAttachmentPixels->handle,
+//        colorAttachmentTexture->image,
+//        vk::ImageLayout::eTransferDstOptimal,
+//        1,
+//        &region,
+//        device->interface
+//    );
+//    // todo: move to a better place
+//    cmd->imageMemoryBarrier(vk::ImageMemoryBarrier2{
+//        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+//        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+//        .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
+//        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+//        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+//        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+//        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+//        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+//        .image = colorAttachmentTexture->image,
+//        .subresourceRange = {
+//            .aspectMask = vk::ImageAspectFlagBits::eColor,
+//            .levelCount = 1,
+//            .layerCount = 1
+//        }
+//    });
+//    cmd->flushBarriers();
+//    colorAttachmentTexture->update(pixels, traceAttachmentPixels.size() * sizeof(glm::vec4));
 
     auto rendering_area = vk::Rect2D{};
     rendering_area.setOffset(vk::Offset2D{0, 0});
@@ -455,7 +463,7 @@ void GameApplication::render() {
     hdr_settings.exposure = options->exposure;
     hdr_settings.gamma    = options->gamma;
 
-    cmd->pushConstants(presentPipelineState, vk::ShaderStageFlagBits::eFragment, 0, sizeof(HDR_Settings), &hdr_settings);
+    cmd->pushConstants(vk::ShaderStageFlagBits::eFragment, 0, sizeof(HDR_Settings), &hdr_settings);
     cmd->draw(6, 1, 0, 0);
     cmd->endRendering();
 
@@ -497,16 +505,30 @@ void GameApplication::render() {
 }
 
 void GameApplication::updateTextureAttachments() {
-    traceIndex = 0;
-    rayDirections.resize(swapchain->drawableSize.width * swapchain->drawableSize.height);
-    colorAttachmentPixels.resize(swapchain->drawableSize.width * swapchain->drawableSize.height);
-    traceAttachmentPixels.resize(swapchain->drawableSize.width * swapchain->drawableSize.height);
-
+    rayDirections = device->makeBuffer(
+        vk::BufferUsageFlagBits::eStorageBuffer,
+        swapchain->drawableSize.width * swapchain->drawableSize.height * sizeof(glm::vec4),
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+    );
     colorAttachmentTexture = device->makeTexture(vfx::TextureDescription{
         .format = vk::Format::eR32G32B32A32Sfloat,
         .width = swapchain->drawableSize.width,
         .height = swapchain->drawableSize.height,
-        .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst
+        .usage = vk::ImageUsageFlagBits::eColorAttachment
+               | vk::ImageUsageFlagBits::eInputAttachment
+               | vk::ImageUsageFlagBits::eSampled
+               | vk::ImageUsageFlagBits::eStorage
+               | vk::ImageUsageFlagBits::eTransferDst
+    });
+    accumulateAttachmentTexture = device->makeTexture(vfx::TextureDescription{
+        .format = vk::Format::eR32G32B32A32Sfloat,
+        .width = swapchain->drawableSize.width,
+        .height = swapchain->drawableSize.height,
+        .usage = vk::ImageUsageFlagBits::eColorAttachment
+               | vk::ImageUsageFlagBits::eInputAttachment
+               | vk::ImageUsageFlagBits::eSampled
+               | vk::ImageUsageFlagBits::eStorage
+               | vk::ImageUsageFlagBits::eTransferDst
     });
     depthAttachmentTexture = device->makeTexture(vfx::TextureDescription{
         .format = vk::Format::eD32Sfloat,
@@ -515,9 +537,12 @@ void GameApplication::updateTextureAttachments() {
         .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eSampled,
     });
 
-    presentResourceGroup->setSampler(defaultTextureSampler, 0);
+    presentResourceGroup->setSampler(textureSampler, 0);
     presentResourceGroup->setTexture(colorAttachmentTexture, 1);
-    presentResourceGroup->setTexture(depthAttachmentTexture, 2);
+//    presentResourceGroup->setTexture(depthAttachmentTexture, 2);
+    raytraceResourceGroup->setStorageImage(colorAttachmentTexture, 0);
+    raytraceResourceGroup->setStorageImage(accumulateAttachmentTexture, 1);
+    raytraceResourceGroup->setStorageBuffer(rayDirections, 0, 2);
 }
 
 void GameApplication::createDefaultPipelineObjects() {
@@ -568,8 +593,9 @@ void GameApplication::createRaytracePipelineObjects() {
     auto function = library->makeFunction("main");
 
     raytracePipelineState = device->makeComputePipelineState(function);
-    raytraceResourceGroup = device->makeResourceGroup(defaultPipelineState->descriptorSetLayouts[0], {
-        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 2}
+    raytraceResourceGroup = device->makeResourceGroup(raytracePipelineState->descriptorSetLayouts[0], {
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 2},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 2}
     });
 }
 
@@ -606,7 +632,10 @@ void GameApplication::windowDidResize() {
     swapchain->updateDrawables();
     mouseHandler->setIgnoreFirstMove();
 
+    accumulateFrame = 0;
     updateTextureAttachments();
+
+    render();
 }
 
 void GameApplication::windowMouseEvent(i32 button, i32 action, i32 mods) {
