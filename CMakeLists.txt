@@ -44,7 +44,7 @@ add_executable(Game
     src/GameApplication.hpp
     src/GameApplication.cpp
     src/ThreadPool.hpp
-)
+        src/stb_image.h src/stb_image.cpp)
 set_target_properties(Game PROPERTIES
     CXX_EXTENSIONS OFF
     CXX_STANDARD 23

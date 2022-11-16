@@ -1,12 +1,27 @@
 #version 450 core
 
+struct RaytraceVertex {
+    vec3 Position;
+    vec3 Normal;
+    vec3 Color;
+    vec2 TexCoord;
+};
+
 layout (local_size_x = 10, local_size_y = 10) in;
 
 layout(set = 0, binding = 0, rgba32f) uniform image2D averrageTexture;
 layout(set = 0, binding = 1, rgba32f) uniform image2D accumulateTexture;
-layout(set = 0, binding = 2) buffer ray_directions_data {
+layout(set = 0, binding = 2) readonly buffer ray_directions_data {
     vec4 rayDirections[];
 };
+layout(set = 0, binding = 3) readonly buffer index_buffer_object {
+    int indices[];
+};
+layout(set = 0, binding = 4) readonly buffer vertex_buffer_object {
+    RaytraceVertex vertices[];
+};
+layout(set = 0, binding = 5) uniform sampler mainSampler;
+layout(set = 0, binding = 6) uniform texture2D mainTexture;
 
 layout(push_constant) uniform push_constant_data {
     vec3 cameraPosition;
@@ -25,82 +40,11 @@ struct AabbPositions {
     float maxZ;
 };
 
-struct Sphere {
-    vec3  Position;
-    float Radius;
-    int   Material;
-};
-
-struct Cube {
-    AabbPositions Shape;
-    int           Material;
-};
-
-struct Triangle {
-    vec3 Vertex[3];
-    int  Material;
-};
-
-struct Object {
-    int Type;
-    int Index;
-};
-
-const int CubeObject = 0;
-const int SphereObject = 1;
-const int TriangleObject = 2;
-
-struct Material {
-    vec3  Albedo;
-    float Roughness;
-    float Metallic;
-};
-
-Material[] materials = Material[](
-    Material(vec3(1, 0, 1), 1.0f, 0.0f),
-    Material(vec3(0, 0, 1), 1.0f, 0.5f),
-    Material(vec3(0, 0, 0), 0.0f, 0.9f)
-);
-
-Sphere[] spheres = Sphere[](
-    Sphere(vec3(-3, 0, 0), 1, 0)
-);
-
-Cube[] cubes = Cube[](
-    Cube(AabbPositions(-0.5 + 2, -0.5, -0.5, 0.5 + 2, 0.5, 0.5), 0),
-    Cube(AabbPositions(-100, -3, -100, 100, -1, 100), 2)
-);
-
-Triangle[] triangles = Triangle[](
-    Triangle(vec3[3](vec3(-1, -1, 0), vec3(-1, 1, 0), vec3(1, -1, 0)), 0)
-);
-
-Object[] objects = Object[](
-    Object(SphereObject, 0),
-    Object(CubeObject, 0),
-    Object(CubeObject, 1),
-    Object(TriangleObject, 0)
-);
-
-vec3 getNormalAABB(const AabbPositions aabb, const vec3 point) {
-    vec3 min = vec3(aabb.minX, aabb.minY, aabb.minZ);
-    vec3 max = vec3(aabb.maxX, aabb.maxY, aabb.maxZ);
-
-    vec3 center = (max + min) * 0.5;
-    vec3 size = (max - min) * 0.5;
-    vec3 pc = point - center;
-    vec3 normal = vec3(0.0);
-    normal += vec3(sign(pc.x), 0.0, 0.0) * step(abs(abs(pc.x) - size.x), kEpsilon);
-    normal += vec3(0.0, sign(pc.y), 0.0) * step(abs(abs(pc.y) - size.y), kEpsilon);
-    normal += vec3(0.0, 0.0, sign(pc.z)) * step(abs(abs(pc.z) - size.z), kEpsilon);
-    return normalize(normal);
-}
-
 struct HitResult {
     float Distance;
     vec3  Normal;
     vec3  Position;
-    int   Material;
+    vec2  TexCoord;
 };
 
 float PHI = 1.61803398874989484820459;
@@ -109,116 +53,51 @@ float random(in vec2 xy, in float seed) {
     return fract(tan(distance(xy * PHI, xy) * seed) * xy.x);
 }
 
-bool getVoxel(ivec3 c) {
-    return c == ivec3(0, 0, 0);
-}
-
-bool traceCube(
-    in Cube cube,
-    in vec3 rayOrigin,
-    in vec3 rayDirection,
-    inout float distance
-) {
-    vec3 p1 = vec3(cube.Shape.minX, cube.Shape.minY, cube.Shape.minZ);
-    vec3 p2 = vec3(cube.Shape.maxX, cube.Shape.maxY, cube.Shape.maxZ);
-
-    vec3 t1 = (p1 - rayOrigin) / rayDirection;
-    vec3 t2 = (p2 - rayOrigin) / rayDirection;
-
-    vec3 tmin = min(t1, t2);
-    float a = max(max(tmin.x, tmin.y), tmin.z);
-    if (a < 0) {
-        return false;
-    }
-
-    vec3 tmax = max(t1, t2);
-    float b = min(min(tmax.x, tmax.y), tmax.z);
-    if (b < a) {
-        return false;
-    }
-
-    if (distance < a) {
-        return false;
-    }
-
-    distance = a;
-    return true;
-}
-
-bool traceSphere(
-    in Sphere sphere,
-    in vec3 rayOrigin,
-    in vec3 rayDirection,
-    inout float distance
-) {
-    float a = dot(rayDirection, rayDirection);
-    vec3 origin = rayOrigin - sphere.Position;
-
-    float b = 2.f * dot(origin, rayDirection);
-    float c = dot(origin, origin) - sphere.Radius * sphere.Radius;
-    float determinant = b * b - 4.f * a * c;
-
-    if (determinant < 0.f) {
-        return false;
-    }
-
-    float t0 = (-b + sqrt(determinant)) / (2.0f * a);
-    float t1 = (-b - sqrt(determinant)) / (2.0f * a);
-    float d = min(t0, t1);
-
-    if (d < 0.0f) {
-        return false;
-    }
-    if (distance < d) {
-        return false;
-    }
-    distance = d;
-    return true;
-}
-
 bool traceTriangle(
-    in Triangle triangle,
     in vec3 rayOrigin,
     in vec3 rayDirection,
+    in vec3 v0,
+    in vec3 v1,
+    in vec3 v2,
+    out float t,
+    out float u,
+    out float v,
     inout float distance
 ) {
-    vec3 v0 = triangle.Vertex[0];
-    vec3 v1 = triangle.Vertex[1];
-    vec3 v2 = triangle.Vertex[2];
-    
     vec3 N = cross(v1 - v0, v2 - v0);
 
     float NdotRayDirection = dot(N, rayDirection);
     if (abs(NdotRayDirection) < kEpsilon) {
         return false;
     }
+    float d = (dot(N, v0) - dot(N, rayOrigin)) / NdotRayDirection;
 
-    float t = (dot(N, v0) - dot(N, rayOrigin)) / NdotRayDirection;
+    if (d < 0) {
+        return false;
+    }
 
+    if (distance < d) {
+        return false;
+    }
+
+    vec3 P = rayOrigin + d * rayDirection;
+
+    t = dot(N, cross(v1 - v0, P - v0));
     if (t < 0) {
         return false;
     }
 
-    if (distance < t) {
+    u = dot(N, cross(v2 - v1, P - v1));
+    if (u < 0) {
         return false;
     }
 
-    vec3 P = rayOrigin + t * rayDirection;
-
-    if (dot(N, cross(v1 - v0, P - v0)) < 0) {
+    v = dot(N, cross(v0 - v2, P - v2));
+    if (v < 0) {
         return false;
     }
 
-    if (dot(N, cross(v2 - v1, P - v1)) < 0) {
-        return false;
-    }
-
-    if (dot(N, cross(v0 - v2, P - v2)) < 0) {
-        return false;
-    }
-
-    distance = t;
-
+    distance = d;
     return true;
 }
 
@@ -228,12 +107,12 @@ HitResult missHit() {
     return ret;
 }
 
-HitResult createHit(float distance, in vec3 normal, in vec3 position, int material) {
+HitResult createHit(float distance, in vec3 normal, in vec3 position, in vec2 texcoord) {
     HitResult ret;
     ret.Distance = distance;
     ret.Normal = normal;
     ret.Position = position;
-    ret.Material = material;
+    ret.TexCoord = texcoord;
     return ret;
 }
 
@@ -241,64 +120,39 @@ HitResult trace(
     in vec3 rayOrigin,
     in vec3 rayDirection
 ) {
-    int objectType = -1;
-    int objectIndex = -1;
+    int firstIndex = -1;
+
+    float T, U, V;
     float distance = 100000.0f;
-    for (int i = 0; i < objects.length(); ++i) {
-        if (objects[i].Type == CubeObject) {
-            if (traceCube(cubes[objects[i].Index], rayOrigin, rayDirection, distance)) {
-                objectType = objects[i].Type;
-                objectIndex = objects[i].Index;
-            }
-            continue;
-        }
-        if (objects[i].Type == SphereObject) {
-            if (traceSphere(spheres[objects[i].Index], rayOrigin, rayDirection, distance)) {
-                objectType = objects[i].Type;
-                objectIndex = objects[i].Index;
-            }
-            continue;
-        }
-        if (objects[i].Type == TriangleObject) {
-            if (traceTriangle(triangles[objects[i].Index], rayOrigin, rayDirection, distance)) {
-                objectType = objects[i].Type;
-                objectIndex = objects[i].Index;
-            }
-            continue;
+    for (int i = 0; i < 3 * 12; i += 3) {
+        vec3 v0 = vertices[indices[i + 0]].Position;
+        vec3 v1 = vertices[indices[i + 1]].Position;
+        vec3 v2 = vertices[indices[i + 2]].Position;
+
+        float t;
+        float u;
+        float v;
+        if (traceTriangle(rayOrigin, rayDirection, v0, v1, v2, t, u, v, distance)) {
+            firstIndex = i;
+            T = t;
+            U = u;
+            V = v;
         }
     }
 
-    if (objectIndex == -1) {
-        return missHit();
-    }
+    if (firstIndex >= 0) {
+        vec3 n1 = vertices[indices[firstIndex + 0]].Normal;
+        vec3 n2 = vertices[indices[firstIndex + 1]].Normal;
+        vec3 n3 = vertices[indices[firstIndex + 2]].Normal;
 
-    if (objectType == CubeObject) {
-        AabbPositions shape = cubes[objectIndex].Shape;
-
-        vec3 p1 = vec3(shape.minX, shape.minY, shape.minZ);
-        vec3 p2 = vec3(shape.maxX, shape.maxY, shape.maxZ);
-
-        vec3 position = rayOrigin + rayDirection * distance;
-        vec3 normal = getNormalAABB(cubes[objectIndex].Shape, position);
-        return createHit(distance, normal, position, cubes[objectIndex].Material);
-    }
-
-    if (objectType == SphereObject) {
-        vec3 position = rayOrigin + rayDirection * distance;
-        vec3 normal = normalize(position - spheres[objectIndex].Position);
-
-        return createHit(distance, normal, position, spheres[objectIndex].Material);
-    }
-
-    if (objectType == TriangleObject) {
-        vec3 v0 = triangles[objectIndex].Vertex[0];
-        vec3 v1 = triangles[objectIndex].Vertex[1];
-        vec3 v2 = triangles[objectIndex].Vertex[2];
+        vec2 uv1 = vertices[indices[firstIndex + 0]].TexCoord;
+        vec2 uv2 = vertices[indices[firstIndex + 1]].TexCoord;
+        vec2 uv3 = vertices[indices[firstIndex + 2]].TexCoord;
 
         vec3 position = rayOrigin + rayDirection * distance;
-        vec3 normal = normalize(cross(v1 - v0, v2 - v0));
-
-        return createHit(distance, normal, position, triangles[objectIndex].Material);
+        vec3 normal = (U * n1 + V * n2 + T * n3) / (U + V + T);
+        vec2 texcoord = (U * uv1 + V * uv2 + T * uv3) / (U + V + T);
+        return createHit(distance, normal, position, texcoord);
     }
 
     return missHit();
@@ -323,23 +177,24 @@ vec4 mainImage(
 
     float ambient = 0.3f;
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 1; ++i) {
         HitResult hit = trace(ro, rd);
         if (hit.Distance <= 0) {
             color += skyColor * multiplier;
             break;
         }
+        vec3 albedo = texture(sampler2D(mainTexture, mainSampler), hit.TexCoord).rgb;
+
         vec3 normal = hit.Normal;
-
         float diffuse = max(dot(normal, -lightDirection), 0.0f) * lightIntensity;
-        float light = clamp(diffuse + ambient, 0, 1);
+        float light = diffuse + ambient;
 
-        color += materials[hit.Material].Albedo * light * multiplier;
+        color += albedo * light * multiplier;
 
         rd = reflect(rd, normal);
         ro = hit.Position + rd * 1e-2f;
 
-        multiplier *= materials[hit.Material].Metallic;
+        multiplier *= 0.0f;//materials[hit.Material].Metallic;
     }
     return vec4(color, 1.0f);
 }
@@ -347,6 +202,10 @@ vec4 mainImage(
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(accumulateTexture);
+
+    if (coord.x > size.x || coord.y > size.y) {
+        return;
+    }
 
     int i = coord.y * size.x + coord.x;
 

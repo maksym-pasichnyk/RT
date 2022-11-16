@@ -47,7 +47,8 @@ private:
     Arc<PlayerInput> playerInput = {};
     Arc<ImGuiRenderer> imguiRenderer = {};
 
-    Arc<vfx::Sampler> textureSampler = {};
+    Arc<vfx::Texture> texture = {};
+    Arc<vfx::Sampler> sampler = {};
     Arc<vfx::Texture> depthAttachmentTexture = {};
     Arc<vfx::Texture> colorAttachmentTexture = {};
     Arc<vfx::Texture> accumulateAttachmentTexture = {};
@@ -62,6 +63,9 @@ private:
 
     Arc<vfx::ComputePipelineState> raytracePipelineState = {};
     Arc<vfx::ResourceGroup> raytraceResourceGroup = {};
+
+    Arc<vfx::Buffer> raytraceIndexBuffer = {};
+    Arc<vfx::Buffer> raytraceVertexBuffer = {};
 
     Arc<vfx::Buffer> sceneConstantsBuffer = {};
 

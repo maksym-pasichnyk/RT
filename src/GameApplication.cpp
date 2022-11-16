@@ -12,7 +12,14 @@
 #include "ThreadPool.hpp"
 #include "spdlog/spdlog.h"
 
-#include <random>
+#include "stb_image.h"
+
+struct RaytraceVertex {
+    float3 position = {};
+    float3 normal   = {};
+    float3 color    = {};
+    float2 texcoord = {};
+};
 
 GameApplication::GameApplication() {
     window = Arc<Window>::alloc(800, 600);
@@ -35,7 +42,7 @@ GameApplication::GameApplication() {
     mouseHandler = Arc<MouseHandler>::alloc(window);
     imguiRenderer = Arc<ImGuiRenderer>::alloc(device, window);
 
-    textureSampler = device->makeSampler(vk::SamplerCreateInfo{
+    sampler = device->makeSampler(vk::SamplerCreateInfo{
         .magFilter = vk::Filter::eNearest,
         .minFilter = vk::Filter::eNearest,
         .mipmapMode = vk::SamplerMipmapMode::eNearest,
@@ -44,18 +51,113 @@ GameApplication::GameApplication() {
         .addressModeW = vk::SamplerAddressMode::eRepeat
     });
 
+    auto rawTextureData = Assets::readFile("textures/Mossy_Cobblestone.png");
+
+    stbi_set_flip_vertically_on_load(true);
+
+    i32 width = 0;
+    i32 height = 0;
+    auto rawPixels = stbi_load_from_memory(reinterpret_cast<stbi_uc*>(rawTextureData.data()), i32(rawTextureData.size()), &width, &height, nullptr, 4);
+
+    texture = device->makeTexture(vfx::TextureDescription{
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .width = u32(width),
+        .height = u32(height),
+        .usage = vk::ImageUsageFlagBits::eColorAttachment
+            | vk::ImageUsageFlagBits::eInputAttachment
+            | vk::ImageUsageFlagBits::eSampled
+            | vk::ImageUsageFlagBits::eTransferDst
+    });
+
+    texture->update(rawPixels, width * height * 4);
+
+    stbi_image_free(rawPixels);
+
     createDefaultPipelineObjects();
     createPresentPipelineObjects();
     createRaytracePipelineObjects();
 
     updateTextureAttachments();
 
+    auto indices = std::vector<i32>{
+        0 + 0, 1 + 0, 2 + 0,
+        0 + 0, 2 + 0, 3 + 0,
+
+        0 + 4, 1 + 4, 2 + 4,
+        0 + 4, 2 + 4, 3 + 4,
+
+        0 + 8, 1 + 8, 2 + 8,
+        0 + 8, 2 + 8, 3 + 8,
+
+        0 + 12, 1 + 12, 2 + 12,
+        0 + 12, 2 + 12, 3 + 12,
+
+        0 + 16, 1 + 16, 2 + 16,
+        0 + 16, 2 + 16, 3 + 16,
+
+        0 + 20, 1 + 20, 2 + 20,
+        0 + 20, 2 + 20, 3 + 20,
+    };
+
+    auto vertices = std::vector{
+        // south
+        RaytraceVertex{glm::vec3(+1, -1, +1), glm::vec3(0, 0, +1), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(+1, +1, +1), glm::vec3(0, 0, +1), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(-1, +1, +1), glm::vec3(0, 0, +1), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(-1, -1, +1), glm::vec3(0, 0, +1), glm::vec3(1, 1, 1), glm::vec2(1, 0)},
+
+        // north
+        RaytraceVertex{glm::vec3(-1, -1, -1), glm::vec3(0, 0, -1), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(-1, +1, -1), glm::vec3(0, 0, -1), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(+1, +1, -1), glm::vec3(0, 0, -1), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(+1, -1, -1), glm::vec3(0, 0, -1), glm::vec3(1, 1, 1), glm::vec2(1, 0)},
+
+        // east
+        RaytraceVertex{glm::vec3(+1, -1, -1), glm::vec3(+1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(+1, +1, -1), glm::vec3(+1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(+1, +1, +1), glm::vec3(+1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(+1, -1, +1), glm::vec3(+1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(1, 0)},
+
+        // west
+        RaytraceVertex{glm::vec3(-1, -1, +1), glm::vec3(-1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(-1, +1, +1), glm::vec3(-1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(-1, +1, -1), glm::vec3(-1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(-1, -1, -1), glm::vec3(-1, 0, 0), glm::vec3(1, 1, 1), glm::vec2(1, 0)},
+
+        // up
+        RaytraceVertex{glm::vec3(-1, +1, -1), glm::vec3(0, +1, 0), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(-1, +1, +1), glm::vec3(0, +1, 0), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(+1, +1, +1), glm::vec3(0, +1, 0), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(+1, +1, -1), glm::vec3(0, +1, 0), glm::vec3(1, 1, 1), glm::vec2(1, 0)},
+
+        // down
+        RaytraceVertex{glm::vec3(-1, -1, +1), glm::vec3(0, -1, 0), glm::vec3(1, 1, 1), glm::vec2(0, 0)},
+        RaytraceVertex{glm::vec3(-1, -1, -1), glm::vec3(0, -1, 0), glm::vec3(1, 1, 1), glm::vec2(0, 1)},
+        RaytraceVertex{glm::vec3(+1, -1, -1), glm::vec3(0, -1, 0), glm::vec3(1, 1, 1), glm::vec2(1, 1)},
+        RaytraceVertex{glm::vec3(+1, -1, +1), glm::vec3(0, -1, 0), glm::vec3(1, 1, 1), glm::vec2(1, 0)}
+    };
+    raytraceIndexBuffer = device->makeBuffer(
+        vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eStorageBuffer,
+        sizeof(i32) * indices.size(),
+        indices.data(),
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+    );
+    raytraceVertexBuffer = device->makeBuffer(
+        vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eStorageBuffer,
+        sizeof(RaytraceVertex) * vertices.size(),
+        vertices.data(),
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+    );
     sceneConstantsBuffer = device->makeBuffer(
         vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eTransferDst,
         sizeof(SceneConstants),
         VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
     );
     defaultResourceGroup->setBuffer(sceneConstantsBuffer, 0, 0);
+    raytraceResourceGroup->setStorageBuffer(raytraceIndexBuffer, 0, 3);
+    raytraceResourceGroup->setStorageBuffer(raytraceVertexBuffer, 0, 4);
+    raytraceResourceGroup->setSampler(sampler, 5);
+    raytraceResourceGroup->setTexture(texture, 6);
 }
 
 GameApplication::~GameApplication() {
@@ -537,7 +639,7 @@ void GameApplication::updateTextureAttachments() {
         .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eSampled,
     });
 
-    presentResourceGroup->setSampler(textureSampler, 0);
+    presentResourceGroup->setSampler(sampler, 0);
     presentResourceGroup->setTexture(colorAttachmentTexture, 1);
 //    presentResourceGroup->setTexture(depthAttachmentTexture, 2);
     raytraceResourceGroup->setStorageImage(colorAttachmentTexture, 0);
@@ -594,8 +696,10 @@ void GameApplication::createRaytracePipelineObjects() {
 
     raytracePipelineState = device->makeComputePipelineState(function);
     raytraceResourceGroup = device->makeResourceGroup(raytracePipelineState->descriptorSetLayouts[0], {
+        vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1},
+        vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, 1},
         vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 2},
-        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 2}
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 3}
     });
 }
 
