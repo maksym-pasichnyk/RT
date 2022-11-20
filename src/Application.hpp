@@ -28,9 +28,13 @@ public:
     void setTitle(const std::string& title);
     void setResizable(bool resizable);
 
+    [[nodiscard]]
     auto shouldClose() -> bool;
+
+    [[nodiscard]]
     auto makeSurface(const Arc<vfx::Context>& context) -> vk::UniqueSurfaceKHR;
 
+    [[nodiscard]]
     auto getSize() const -> std::array<i32, 2>;
 
 private:
